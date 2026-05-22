@@ -1,0 +1,198 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+
+html, body {
+  background: #070912;
+  color: #e9edf2;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(212, 169, 63, 0.65);
+  outline-offset: 3px;
+}
+
+.font-mono, [class*="font-mono"] {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.h-display {
+  font-weight: 900;
+  letter-spacing: -0.035em;
+  line-height: 0.92;
+}
+
+.kicker {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+}
+
+/* Deep hero — chalkboard + dugout dust */
+.hero-deep {
+  background:
+    radial-gradient(1100px 600px at 12% -10%, rgba(212, 169, 63, 0.20), transparent 60%),
+    radial-gradient(900px 520px at 90% 0%, rgba(63, 107, 58, 0.30), transparent 65%),
+    radial-gradient(800px 600px at 50% 110%, rgba(180, 92, 58, 0.18), transparent 60%),
+    linear-gradient(180deg, #070912 0%, #0a0f1a 60%, #0a0f1a 100%);
+  color: #e9edf2;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+.hero-deep::after {
+  content: "";
+  position: absolute; inset: 0;
+  pointer-events: none; z-index: 1;
+  opacity: 0.06; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+.orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(64px);
+  will-change: transform;
+  z-index: 0;
+}
+
+/* Chalkboard panel — used for report sections */
+.chalk-panel {
+  position: relative;
+  background:
+    radial-gradient(ellipse at 30% 0%, rgba(255,255,255,0.04), transparent 50%),
+    linear-gradient(180deg, #1b2820 0%, #131a16 100%);
+  border: 1px solid #2b3a30;
+  border-radius: 18px;
+  overflow: hidden;
+}
+.chalk-panel::before {
+  content: "";
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(180deg, rgba(255,255,255,0.018) 0px, rgba(255,255,255,0.018) 1px, transparent 1px, transparent 6px);
+  opacity: 0.6;
+}
+
+/* Card surface — deep panel */
+.card-deep {
+  position: relative;
+  background: linear-gradient(180deg, #111726 0%, #0c1220 100%);
+  border: 1px solid #1f2737;
+  border-radius: 14px;
+  overflow: hidden;
+  transition: transform 240ms cubic-bezier(.2,.7,.2,1), border-color 220ms ease, box-shadow 240ms ease;
+}
+.card-deep:hover {
+  transform: translateY(-2px);
+  border-color: rgba(212,169,63,0.35);
+  box-shadow: 0 18px 40px -22px rgba(0,0,0,0.6);
+}
+
+/* Inputs / selects on deep bg */
+.input-deep, .select-deep {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: #e9edf2;
+  border-radius: 8px;
+  padding: 10px 13px;
+  font-size: 14px;
+  transition: border-color 160ms ease, background 160ms ease;
+  width: 100%;
+}
+.input-deep:focus, .select-deep:focus {
+  outline: none;
+  border-color: rgba(212,169,63,0.55);
+  background: rgba(255,255,255,0.06);
+}
+
+/* Primary CTA */
+.btn-gold {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: linear-gradient(180deg, #d4a93f 0%, #b3892a 100%);
+  color: #0a0f1a;
+  font-weight: 700;
+  font-size: 0.95rem;
+  padding: 0.8rem 1.6rem;
+  border-radius: 999px;
+  transition: transform 160ms ease, box-shadow 220ms ease, filter 160ms ease;
+  box-shadow: 0 14px 30px -14px rgba(212, 169, 63, 0.75);
+}
+.btn-gold:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+  box-shadow: 0 18px 40px -14px rgba(212, 169, 63, 0.9);
+}
+.btn-gold:disabled {
+  filter: grayscale(0.7) brightness(0.7);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-ghost-deep {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid rgba(255,255,255,0.22);
+  color: #e9edf2;
+  font-weight: 600;
+  font-size: 0.875rem;
+  padding: 0.65rem 1.2rem;
+  border-radius: 999px;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.btn-ghost-deep:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.4);
+}
+
+.hairline-deep {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.18) 50%, transparent 100%);
+}
+
+/* Tag chips */
+.chip-pos {
+  display: inline-flex;
+  align-items: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(212, 169, 63, 0.14);
+  border: 1px solid rgba(212, 169, 63, 0.3);
+  color: #f0d27f;
+  white-space: nowrap;
+}
+.chip-hof {
+  background: rgba(212, 169, 63, 0.95);
+  color: #0a0f1a;
+  border-color: rgba(212, 169, 63, 1);
+}
+
+/* Pulse on the "Generating..." indicator */
+.scout-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #d4a93f;
+  animation: pulseDot 2.2s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb, .animate-orbit, .animate-drift, .scout-dot { animation: none !important; }
+}

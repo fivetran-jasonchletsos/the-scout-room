@@ -1,0 +1,29 @@
+name: the_scout_room
+version: 1.0.0
+config-version: 2
+
+profile: scout_room
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  the_scout_room:
+    bronze:
+      +materialized: external_table     # Iceberg landing zone — Fivetran writes here
+      +schema: bronze
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold

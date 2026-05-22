@@ -1,0 +1,49 @@
+version: 2
+
+sources:
+  - name: lahman
+    description: >
+      Sean Lahman's Baseball Database, landed into Iceberg via Fivetran's
+      Iceberg destination. One-time load from chadwickbureau/baseballdatabank
+      (CC BY-SA 3.0), with incremental refreshes via Fivetran custom
+      connector when the upstream zip is updated.
+    schema: bronze
+    tables:
+      - name: people
+        description: One row per player (~20K rows, 1871-present).
+      - name: batting
+        description: Player-season batting line.
+      - name: pitching
+        description: Player-season pitching line.
+      - name: appearances
+        description: Player-season-team position appearances.
+      - name: allstar_full
+        description: All-Star game selections.
+      - name: hall_of_fame
+        description: Hall of Fame voting + induction.
+      - name: awards_players
+        description: Major award winners.
+      - name: teams
+        description: Team-season records.
+      - name: teams_franchises
+        description: Franchise lineage (handles relocations + renames).
+
+  - name: statcast
+    description: >
+      Modern pitch-level + batted-ball data via the MLB Statcast feed.
+      Fivetran custom connector polls Baseball Savant daily.
+    schema: bronze
+    tables:
+      - name: pitch_level
+        description: Every pitch since 2015 — release point, velo, spin, xwOBA.
+      - name: batted_ball
+        description: Every ball in play — exit velo, launch angle, hit distance.
+
+  - name: mlb_stats_api
+    description: >
+      Live game state + roster + transactions via the public MLB Stats API.
+    schema: bronze
+    tables:
+      - name: players_current
+      - name: rosters
+      - name: transactions

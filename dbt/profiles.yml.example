@@ -1,0 +1,22 @@
+# Copy to ~/.dbt/profiles.yml and edit values.
+#
+# Iceberg-first ODI pattern: bronze lives in S3 + Iceberg via Fivetran's
+# Iceberg destination. Silver and gold are managed Iceberg tables under
+# Snowflake's external volume (so the same bytes are queryable by Athena,
+# Databricks, etc. — the whole ODI promise).
+
+scout_room:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: <your_account>
+      user: <your_user>
+      password: <your_password>
+      role: TRANSFORMER
+      warehouse: TRANSFORM_WH
+      database: SCOUT_ROOM
+      schema: SILVER
+      threads: 8
+      client_session_keep_alive: false
+      query_tag: scout_room_dbt

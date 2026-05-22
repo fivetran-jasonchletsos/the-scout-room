@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+*.log
+.DS_Store
+.env*
+.vercel
+next-env.d.ts
+*.tsbuildinfo
+data-raw/baseballdatabank-master/
+data-raw/baseballdatabank.zip
