@@ -32,6 +32,10 @@ export type Player = {
   hofYear: number | null;
   franchs: string[];
   careerValue: number;
+  // Optional: backed by data-raw/fetch_photos_v2.py
+  wiki_image?: string;
+  wiki_title?: string;
+  wiki_page?:  string;
 };
 
 export type Franchise = {
@@ -49,9 +53,26 @@ export type Archetype = {
   examples: string[];
 };
 
-export type ScoutReportInputs = {
+export type CityCentroid = {
+  city: string;
+  state: string;
+  lat: number;
+  lng: number;
+};
+
+export type TeamLocation = {
   franchID: string;
-  birthState: string;
+  name: string;
+  city: string;
+  state: string;
+  lat: number;
+  lng: number;
+};
+
+export type ScoutReportInputs = {
+  city: string;
+  state: string;
+  franchID?: string;   // optional override; otherwise inferred from hometown
 };
 
 export type ReportSection = {

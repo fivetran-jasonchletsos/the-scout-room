@@ -10,9 +10,9 @@
 
 import {
   PLAYERS, TEAMS, TEAM_ALUMNI, PLAYERS_BY_STATE,
-  ARCHETYPES, LEADERS, getPlayer, getTeam,
+  ARCHETYPES, LEADERS, CITIES, TEAM_LOCATIONS, getPlayer, getTeam,
 } from "./data";
-import type { Player } from "./types";
+import type { Player, CityCentroid, TeamLocation } from "./types";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Section types
@@ -21,8 +21,27 @@ import type { Player } from "./types";
 export type HometownHero = {
   player: Player;
   rank: number;
+  // Distance from the user's hometown in miles. null when we don't have
+  // coords for either side and the player was matched via state fallback.
+  distanceMi: number | null;
   // Why does this player matter for someone from this state?
   insight: string;
+};
+
+export type TeamInference = {
+  inferredFranchID: string;
+  inferredTeam: TeamLocation;
+  distanceMi: number;
+  runnersUp: { team: TeamLocation; distanceMi: number }[];
+  basis: "hometown" | "state-fallback" | "override";
+};
+
+export type HometownInput = {
+  city: string;       // raw user input, e.g. "Tampa"
+  state: string;      // state code
+  lat: number | null;
+  lng: number | null;
+  matched: boolean;   // true if we resolved city+state to coords
 };
 
 export type ArchetypeFinding = {
@@ -32,11 +51,35 @@ export type ArchetypeFinding = {
   insight: string;
 };
 
+// A single axis of the 6-dimensional career profile.
+// `raw` is the original stat (HR, K/9, etc).
+// `z` is z-scored against the player's era cohort (so 1920s and 2010s are comparable).
+// `pct` is the percentile (0–100) within the era cohort — what we render on the radar.
+export type ProfileAxis = {
+  key: string;     // short identifier ("vol", "pow", ...)
+  label: string;   // display label
+  raw: number;
+  z: number;
+  pct: number;     // 0..100
+};
+
+export type PlayerProfile = {
+  player: Player;
+  role: "bat" | "pit";
+  era: string;
+  axes: ProfileAxis[];   // length 6, ordered consistently for the role
+};
+
 export type Comp = {
   anchor: Player;          // Hall of Famer / franchise legend
-  candidate: Player;       // a player whose age-similar stats mirror the anchor
-  ageAtSnapshot: number;
-  similarity: number;      // 0..1 (cosine-like over normalized stats)
+  candidate: Player;       // a player whose era-adjusted profile mirrors the anchor's
+  anchorProfile: PlayerProfile;
+  candidateProfile: PlayerProfile;
+  similarity: number;      // 0..1 (cosine over z-scored era-cohort vector)
+  tightestAxis: ProfileAxis;       // axis where the two are closest (smallest |Δpct|)
+  widestAxis: ProfileAxis;         // axis where they diverge most (largest |Δpct|)
+  anchorEdgeAxis: ProfileAxis;     // axis where anchor's percentile most exceeds candidate's
+  candidateEdgeAxis: ProfileAxis;  // axis where candidate's percentile most exceeds anchor's
   insight: string;
 };
 
@@ -46,12 +89,51 @@ export type DidYouKnow = {
   detail: string;
 };
 
+// Franchise decade timeline — one row per decade, with per-position counts of
+// inner-30 alumni active that decade. Drives the stacked-bar chart in the
+// Prospect Persona section.
+export type FranchiseDecadeRow = {
+  decadeStart: number;          // e.g. 1990 = 1990s
+  total: number;
+  byPosition: Record<string, number>;
+};
+
+export type FranchiseTimeline = {
+  rows: FranchiseDecadeRow[];   // ascending by decade, only decades with >0
+  peakDecade: number | null;
+  peakCount: number;
+  dominantPositionByDecade: Record<number, string>;
+  insight: string;
+};
+
+// State density — top-100 player counts per state, used for both the rank bar
+// and the tile-map choropleth.
+export type StateDensity = {
+  code: string;
+  name: string;
+  count: number;
+  quintile: 0 | 1 | 2 | 3 | 4;   // 4 = densest, 0 = sparsest (or zero)
+};
+
+export type StateDensityReport = {
+  rows: StateDensity[];         // every state, sorted by count desc
+  userRank: number;             // 1-based rank within rows
+  userQuintile: 0 | 1 | 2 | 3 | 4;
+  topState: StateDensity | null;
+  insight: string;
+};
+
 export type ScoutReport = {
   team: ReturnType<typeof getTeam>;
   stateCode: string;
   stateName: string;
+  hometownInput: HometownInput;
+  teamInference: TeamInference;
+  radiusMi: number;
   hometown: HometownHero[];
   persona: ArchetypeFinding[];
+  timeline: FranchiseTimeline;
+  stateDensity: StateDensityReport;
   comp: Comp | null;
   didYouKnow: DidYouKnow[];
   narrative: string;
@@ -84,17 +166,234 @@ function isPitcher(p: Player): boolean {
   return p.primaryPos === "P";
 }
 
-// Cosine-like similarity over a small stat vector, anchored by primary role.
-function similarity(a: Player, b: Player): number {
-  if (isPitcher(a) !== isPitcher(b)) return 0;
-  if (isPitcher(a)) {
-    const av = [a.pitchingTotals?.W ?? 0, a.pitchingTotals?.SO ?? 0, a.pitchingTotals?.G ?? 0];
-    const bv = [b.pitchingTotals?.W ?? 0, b.pitchingTotals?.SO ?? 0, b.pitchingTotals?.G ?? 0];
-    return cosine(av, bv);
+// ─────────────────────────────────────────────────────────────────────────
+// Geo helpers — hometown radius search + team inference.
+//
+// User picks a city + state. We look it up in CITIES (centroid table) to
+// get coords. For every candidate player, we look up their birth city in
+// the same table. Both sides need to resolve for a radius match; otherwise
+// we fall back to a state-level pool.
+// ─────────────────────────────────────────────────────────────────────────
+
+export const DEFAULT_RADIUS_MI = 75;
+
+// Build a normalized index of cities by "city|state" (case-insensitive).
+const cityIndex: Map<string, CityCentroid> = (() => {
+  const m = new Map<string, CityCentroid>();
+  for (const c of CITIES) m.set(`${c.city.toLowerCase()}|${c.state.toUpperCase()}`, c);
+  return m;
+})();
+
+export function geocodeCity(city: string, state: string): CityCentroid | null {
+  if (!city || !state) return null;
+  return cityIndex.get(`${city.trim().toLowerCase()}|${state.trim().toUpperCase()}`) ?? null;
+}
+
+// Haversine distance in miles.
+const EARTH_RADIUS_MI = 3958.8;
+export function haversineMi(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_MI * Math.asin(Math.sqrt(s));
+}
+
+// Distance from one player to a center, using the player's birth city
+// centroid if we have it. Returns null when we don't.
+function distanceFromPlayer(p: Player, lat: number, lng: number): number | null {
+  const c = p.birthCity && p.birthState ? geocodeCity(p.birthCity, p.birthState) : null;
+  if (!c) return null;
+  return haversineMi(lat, lng, c.lat, c.lng);
+}
+
+// Build a ranked-by-distance team list given a hometown centroid.
+export function inferFranchise(lat: number, lng: number): TeamInference {
+  const scored = TEAM_LOCATIONS.map((t) => ({ team: t, distanceMi: haversineMi(lat, lng, t.lat, t.lng) }))
+    .sort((a, b) => a.distanceMi - b.distanceMi);
+  const top = scored[0];
+  return {
+    inferredFranchID: top.team.franchID,
+    inferredTeam: top.team,
+    distanceMi: top.distanceMi,
+    runnersUp: scored.slice(1, 4),
+    basis: "hometown",
+  };
+}
+
+// State-fallback team inference: pick the franchise whose state matches the
+// user's, or the geographically closest if multiple. Uses team centroid
+// rather than a true state-level pool, so it's still deterministic.
+function inferFranchiseFromState(stateCode: string): TeamInference {
+  const candidates = TEAM_LOCATIONS.filter((t) => t.state === stateCode);
+  if (candidates.length > 0) {
+    const team = candidates[0];
+    return {
+      inferredFranchID: team.franchID,
+      inferredTeam: team,
+      distanceMi: 0,
+      runnersUp: candidates.slice(1).map((t) => ({ team: t, distanceMi: 0 })),
+      basis: "state-fallback",
+    };
   }
-  const av = [a.battingTotals.H, a.battingTotals.HR, a.battingTotals.G];
-  const bv = [b.battingTotals.H, b.battingTotals.HR, b.battingTotals.G];
-  return cosine(av, bv);
+  // Sketch fallback: no franchise in user's state — pick the first whose
+  // state borders or whatever; for simplicity, use the first franchise.
+  // This branch is rare (states like AK, ND, MT, etc).
+  const team = TEAM_LOCATIONS[0];
+  return {
+    inferredFranchID: team.franchID,
+    inferredTeam: team,
+    distanceMi: 0,
+    runnersUp: TEAM_LOCATIONS.slice(1, 4).map((t) => ({ team: t, distanceMi: 0 })),
+    basis: "state-fallback",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Era-adjusted 6-axis profiles
+//
+// Raw counting stats (HR, K, wins) are useless across eras: 30 HR in 1925 is
+// a different signal than 30 HR in 2001. We bucket every player by debut
+// era, compute per-era mean + std for each axis, then z-score. Players are
+// compared on those z-vectors via cosine. This is the same idea used in the
+// dbt model agg_era_normalized_profiles.sql.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Per-role axis definitions. Each axis extracts a numeric value from a Player.
+// Order matters — both anchor and candidate vectors must use the same axis order.
+type AxisDef = { key: string; label: string; extract: (p: Player) => number };
+
+const BAT_AXES: AxisDef[] = [
+  { key: "vol", label: "Volume",     extract: (p) => p.battingTotals.G },
+  { key: "pow", label: "Power",      extract: (p) => rate(p.battingTotals.HR, p.battingTotals.AB) },
+  { key: "ctc", label: "Contact",    extract: (p) => rate(p.battingTotals.H, p.battingTotals.AB) },
+  { key: "rbi", label: "Run prod.",  extract: (p) => rate(p.battingTotals.RBI ?? 0, p.battingTotals.G) },
+  { key: "eye", label: "Plate eye",  extract: (p) => {
+      const bb = p.battingTotals.BB ?? 0;
+      const so = p.battingTotals.SO ?? 0;
+      return bb / (bb + so + 1);
+    } },
+  { key: "lng", label: "Longevity",  extract: (p) => Math.max(1, (p.finalYear || p.debutYear) - p.debutYear + 1) },
+];
+
+const PIT_AXES: AxisDef[] = [
+  { key: "vol", label: "Volume",     extract: (p) => p.pitchingTotals?.G ?? 0 },
+  { key: "k9",  label: "K-rate",     extract: (p) => per9(p.pitchingTotals?.SO ?? 0, p.pitchingTotals?.IPouts ?? 0) },
+  { key: "ip",  label: "Workload",   extract: (p) => (p.pitchingTotals?.IPouts ?? 0) / 3 },
+  { key: "win", label: "Win rate",   extract: (p) => {
+      const w = p.pitchingTotals?.W ?? 0;
+      const l = p.pitchingTotals?.L ?? 0;
+      return w / (w + l + 1);
+    } },
+  { key: "kbb", label: "K/BB",       extract: (p) => {
+      const so = p.pitchingTotals?.SO ?? 0;
+      const bb = p.pitchingTotals?.BB ?? 0;
+      return so / (bb + 1);
+    } },
+  { key: "lng", label: "Longevity",  extract: (p) => Math.max(1, (p.finalYear || p.debutYear) - p.debutYear + 1) },
+];
+
+function rate(num: number, denom: number | undefined): number {
+  if (!denom || denom <= 0) return 0;
+  return num / denom;
+}
+
+function per9(events: number, ipOuts: number): number {
+  if (!ipOuts || ipOuts <= 0) return 0;
+  return (events * 27) / ipOuts;
+}
+
+// Per-era moments cached at module load. eraKey -> axisKey -> {mean, std}
+type Moments = { mean: number; std: number };
+type CohortStats = Record<string, Record<string, Moments>>;
+
+// Per-era sorted-axis-values cache, for percentile lookups.
+type CohortSorted = Record<string, Record<string, number[]>>;
+
+let _cohortBat: CohortStats | null = null;
+let _cohortPit: CohortStats | null = null;
+let _sortedBat: CohortSorted | null = null;
+let _sortedPit: CohortSorted | null = null;
+
+function eligibleBatters(): Player[] {
+  return Object.values(PLAYERS).filter((p) => !isPitcher(p) && p.battingTotals.G >= 50);
+}
+function eligiblePitchers(): Player[] {
+  return Object.values(PLAYERS).filter((p) => isPitcher(p) && (p.pitchingTotals?.G ?? 0) >= 20);
+}
+
+function buildCohort(pool: Player[], axes: AxisDef[]): { stats: CohortStats; sorted: CohortSorted } {
+  const buckets: Record<string, Record<string, number[]>> = {};
+  for (const p of pool) {
+    const era = eraOf(p.debutYear);
+    buckets[era] ??= {};
+    for (const ax of axes) {
+      buckets[era][ax.key] ??= [];
+      buckets[era][ax.key].push(ax.extract(p));
+    }
+  }
+  const stats: CohortStats = {};
+  const sorted: CohortSorted = {};
+  for (const [era, byAxis] of Object.entries(buckets)) {
+    stats[era] = {};
+    sorted[era] = {};
+    for (const [key, vals] of Object.entries(byAxis)) {
+      const n = vals.length || 1;
+      const mean = vals.reduce((s, x) => s + x, 0) / n;
+      const variance = vals.reduce((s, x) => s + (x - mean) ** 2, 0) / n;
+      const std = Math.sqrt(variance) || 1;
+      stats[era][key] = { mean, std };
+      sorted[era][key] = [...vals].sort((a, b) => a - b);
+    }
+  }
+  return { stats, sorted };
+}
+
+function cohortBat() {
+  if (!_cohortBat) {
+    const r = buildCohort(eligibleBatters(), BAT_AXES);
+    _cohortBat = r.stats;
+    _sortedBat = r.sorted;
+  }
+  return { stats: _cohortBat!, sorted: _sortedBat! };
+}
+function cohortPit() {
+  if (!_cohortPit) {
+    const r = buildCohort(eligiblePitchers(), PIT_AXES);
+    _cohortPit = r.stats;
+    _sortedPit = r.sorted;
+  }
+  return { stats: _cohortPit!, sorted: _sortedPit! };
+}
+
+// Percentile of `v` within a sorted ascending array (0..100).
+function percentileOf(v: number, sorted: number[]): number {
+  if (sorted.length === 0) return 50;
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid] < v) lo = mid + 1;
+    else hi = mid;
+  }
+  return Math.round((lo / sorted.length) * 100);
+}
+
+export function profileOf(p: Player): PlayerProfile {
+  const role: "bat" | "pit" = isPitcher(p) ? "pit" : "bat";
+  const axes = role === "pit" ? PIT_AXES : BAT_AXES;
+  const { stats, sorted } = role === "pit" ? cohortPit() : cohortBat();
+  const era = eraOf(p.debutYear);
+  const cohortStats = stats[era] ?? {};
+  const cohortSorted = sorted[era] ?? {};
+  const out: ProfileAxis[] = axes.map((ax) => {
+    const raw = ax.extract(p);
+    const m = cohortStats[ax.key] ?? { mean: raw, std: 1 };
+    const z = (raw - m.mean) / (m.std || 1);
+    const pct = percentileOf(raw, cohortSorted[ax.key] ?? [raw]);
+    return { key: ax.key, label: ax.label, raw, z, pct };
+  });
+  return { player: p, role, era, axes: out };
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -108,65 +407,150 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+// Cosine similarity over the era-adjusted z-vectors. Range is roughly
+// −1..1; clamp to 0..1 for the UI (negative means "opposite shape",
+// which is just as far away as "different shape" for our purposes).
+function similarityProfiles(a: PlayerProfile, b: PlayerProfile): number {
+  if (a.role !== b.role) return 0;
+  const av = a.axes.map((x) => x.z);
+  const bv = b.axes.map((x) => x.z);
+  return Math.max(0, cosine(av, bv));
+}
+
 // Pick a deterministic "candidate" comp for a Hall of Famer anchor.
-// We exclude the anchor itself and other inner-circle HOFers — the point of
-// the exercise is "this lesser-known player's profile mirrors a legend's".
-function findComp(anchor: Player): Comp | null {
-  const stateCandidates = anchor.birthState
-    ? (PLAYERS_BY_STATE[anchor.birthState] || []).map(getPlayer).filter(Boolean) as Player[]
-    : Object.values(PLAYERS);
-  let best: { p: Player; sim: number } | null = null;
-  for (const cand of stateCandidates) {
+//
+// Strategy:
+//   1. Build the anchor's era-adjusted 6-axis profile.
+//   2. Pull the candidate pool (anchor's birth state if available, else any).
+//   3. Filter: not the anchor, not a HOFer, role-matched, meaningful career
+//      (≥200 game-equivalents to filter out cup-of-coffee careers).
+//   4. Score every candidate via cosine similarity over their z-vectors.
+//   5. Accept the best if similarity ≥ 0.6.
+//   6. Compute the axis-level deltas (tightest, widest, anchor edge, cand edge)
+//      that the radar chart will show — these drive the dynamic insight.
+function findComp(anchor: Player, home: HometownInput | null, radiusMi: number): Comp | null {
+  const anchorProfile = profileOf(anchor);
+  let pool: Player[];
+  if (home && home.matched && home.lat !== null && home.lng !== null) {
+    const lat = home.lat, lng = home.lng;
+    pool = Object.values(PLAYERS).filter((p) => {
+      const d = distanceFromPlayer(p, lat, lng);
+      return d !== null && d <= radiusMi;
+    });
+  } else {
+    pool = anchor.birthState
+      ? (PLAYERS_BY_STATE[anchor.birthState] || []).map(getPlayer).filter(Boolean) as Player[]
+      : Object.values(PLAYERS);
+  }
+  let best: { p: Player; prof: PlayerProfile; sim: number } | null = null;
+  for (const cand of pool) {
     if (cand.id === anchor.id) continue;
     if (cand.hof) continue;                              // not another HOFer
     if (isPitcher(cand) !== isPitcher(anchor)) continue;
     if ((cand.battingTotals.G + (cand.pitchingTotals?.G ?? 0)) < 200) continue;
-    const sim = similarity(anchor, cand);
-    if (!best || sim > best.sim) best = { p: cand, sim };
+    const prof = profileOf(cand);
+    const sim = similarityProfiles(anchorProfile, prof);
+    if (!best || sim > best.sim) best = { p: cand, prof, sim };
   }
-  if (!best || best.sim < 0.7) return null;
-  const ageAtSnapshot = anchor.finalYear - anchor.debutYear + 1;
+  if (!best || best.sim < 0.6) return null;
+
+  const axisDeltas = anchorProfile.axes.map((a, i) => ({
+    axis: a,
+    candAxis: best!.prof.axes[i],
+    delta: a.pct - best!.prof.axes[i].pct,   // positive = anchor higher
+  }));
+  const tightest = [...axisDeltas].sort((x, y) => Math.abs(x.delta) - Math.abs(y.delta))[0];
+  const widest   = [...axisDeltas].sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta))[0];
+  const anchorEdge = [...axisDeltas].sort((x, y) => y.delta - x.delta)[0];
+  const candEdge   = [...axisDeltas].sort((x, y) => x.delta - y.delta)[0];
+
   return {
     anchor,
     candidate: best.p,
-    ageAtSnapshot,
+    anchorProfile,
+    candidateProfile: best.prof,
     similarity: best.sim,
-    insight: buildCompInsight(anchor, best.p, best.sim),
+    tightestAxis: tightest.axis,
+    widestAxis:   widest.axis,
+    anchorEdgeAxis:    anchorEdge.axis,
+    candidateEdgeAxis: candEdge.axis,
+    insight: buildCompInsight(anchorProfile, best.prof, best.sim, {
+      tightest, widest, anchorEdge, candEdge,
+    }),
   };
 }
 
-function buildCompInsight(anchor: Player, cand: Player, sim: number): string {
+type AxisDelta = { axis: ProfileAxis; candAxis: ProfileAxis; delta: number };
+
+function buildCompInsight(
+  anchor: PlayerProfile,
+  cand: PlayerProfile,
+  sim: number,
+  d: { tightest: AxisDelta; widest: AxisDelta; anchorEdge: AxisDelta; candEdge: AxisDelta },
+): string {
   const pct = Math.round(sim * 100);
-  if (isPitcher(anchor)) {
-    return `${cand.fullName}'s career W/SO/G profile shares ${pct}% similarity with ${anchor.fullName}'s ` +
-           `at the same point in their careers. ${anchor.fullName} is in Cooperstown. ` +
-           `${cand.fullName} isn't — but the shape of their work tells the same story.`;
-  }
-  return `${cand.fullName}'s career H/HR/G profile shares ${pct}% similarity with ${anchor.fullName}'s ` +
-         `at the same point in their careers. ${anchor.fullName} is in Cooperstown. ` +
-         `${cand.fullName} isn't — but the shape of their work tells the same story.`;
+  const anchorName = anchor.player.fullName;
+  const candName   = cand.player.fullName;
+  const tight = d.tightest;
+  const wide  = d.widest;
+
+  const tightLine = Math.abs(tight.delta) <= 5
+    ? `Their era-adjusted ${tight.axis.label.toLowerCase()} percentiles sit within ${Math.abs(tight.delta)} points (${tight.axis.pct} vs ${tight.candAxis.pct}).`
+    : `They're closest on ${tight.axis.label.toLowerCase()} — ${tight.axis.pct} vs ${tight.candAxis.pct} percentile.`;
+
+  const wideLine = Math.abs(wide.delta) >= 15
+    ? `Where ${anchorName.split(" ").slice(-1)[0]} pulls ahead: ${wide.axis.label.toLowerCase()} (${wide.axis.pct} vs ${wide.candAxis.pct}).`
+    : `Even on their widest axis (${wide.axis.label.toLowerCase()}) the gap is only ${Math.abs(wide.delta)} percentile points.`;
+
+  return `${candName}'s era-adjusted profile shares ${pct}% cosine similarity with ${anchorName}'s, ` +
+         `measured against the ${anchor.era} cohort. ${tightLine} ${wideLine} ` +
+         `${anchorName} is in Cooperstown. ${candName} isn't — but the shape of their work tells the same story.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Section: Hometown Heroes
 // ─────────────────────────────────────────────────────────────────────────
 
-function buildHometown(stateCode: string): HometownHero[] {
-  const list = (PLAYERS_BY_STATE[stateCode] || []).slice(0, 5);
+// Build the hometown-heroes list.
+//
+// Primary mode (when we have hometown coords):
+//   - Pull every US player; compute distance from their birth city to the
+//     user's hometown via the city-centroid table.
+//   - Filter to those within radiusMi.
+//   - Score by careerValue (descending). Take top 5.
+//
+// Fallback mode (no hometown coords):
+//   - Use the legacy PLAYERS_BY_STATE list (already sorted by careerValue).
+//
+// Either way, returns at most 5 heroes with their `distanceMi` (null in
+// fallback mode).
+function buildHometown(home: HometownInput, radiusMi: number): HometownHero[] {
+  if (home.matched && home.lat !== null && home.lng !== null) {
+    const lat = home.lat, lng = home.lng;
+    const ranked = Object.values(PLAYERS)
+      .map((p) => ({ p, d: distanceFromPlayer(p, lat, lng) }))
+      .filter((x): x is { p: Player; d: number } => x.d !== null && x.d <= radiusMi)
+      .sort((a, b) => b.p.careerValue - a.p.careerValue)
+      .slice(0, 5);
+    return ranked.map(({ p, d }, i) => ({
+      player: p,
+      rank: i + 1,
+      distanceMi: d,
+      insight: buildHometownInsight(p, i + 1, d, home.city),
+    }));
+  }
+  // State fallback — preserves legacy behavior when we can't geocode
+  const list = (PLAYERS_BY_STATE[home.state] || []).slice(0, 5);
   return list
     .map((pid, i) => {
       const p = getPlayer(pid);
       if (!p) return null;
-      return {
-        player: p,
-        rank: i + 1,
-        insight: buildHometownInsight(p, i + 1),
-      };
+      return { player: p, rank: i + 1, distanceMi: null, insight: buildHometownInsight(p, i + 1, null, home.city) };
     })
     .filter(Boolean) as HometownHero[];
 }
 
-function buildHometownInsight(p: Player, rank: number): string {
+function buildHometownInsight(p: Player, rank: number, distanceMi: number | null, userCity: string): string {
   const era = eraOf(p.debutYear);
   const bits: string[] = [];
   if (p.hof) bits.push(`Hall of Fame, class of ${p.hofYear}`);
@@ -177,7 +561,10 @@ function buildHometownInsight(p: Player, rank: number): string {
   }
   if (bits.length === 0) bits.push(`${era} ${p.primaryPos ?? "player"}`);
   const ord = rank === 1 ? "the top" : rank === 2 ? "second" : rank === 3 ? "third" : "a top-five";
-  return `${ord} career produced by a ${era} player born in ${p.birthCity ?? "this state"}. ${bits.join(" · ")}.`;
+  const where = distanceMi !== null && userCity
+    ? `${p.birthCity ?? "nearby"} — ${Math.round(distanceMi)} mi from ${userCity}`
+    : `${p.birthCity ?? "this state"}`;
+  return `${ord} career produced by a ${era} player born in ${where}. ${bits.join(" · ")}.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -227,7 +614,7 @@ const POS_LONG: Record<string, string> = {
 // Section: Hidden Comp — find a non-HOFer whose profile mirrors a franchise legend
 // ─────────────────────────────────────────────────────────────────────────
 
-function buildComp(franchID: string, stateCode: string): Comp | null {
+function buildComp(franchID: string, home: HometownInput | null, radiusMi: number): Comp | null {
   // Anchor = franchise's top all-time HOFer if any, else top alumnus.
   const alumIDs = TEAM_ALUMNI[franchID] || [];
   let anchor: Player | null = null;
@@ -242,7 +629,7 @@ function buildComp(franchID: string, stateCode: string): Comp | null {
     }
   }
   if (!anchor) return null;
-  return findComp(anchor);
+  return findComp(anchor, home, radiusMi);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -304,6 +691,113 @@ function buildDidYouKnow(franchID: string, stateCode: string): DidYouKnow[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Section: Franchise Decade Timeline — for each decade 1870s..2020s,
+// count how many of the inner-30 alumni were active that decade by
+// primary position. The viz lets the eye see when the franchise actually
+// built its core (e.g. Dodgers cluster 1950s + 1990s).
+// ─────────────────────────────────────────────────────────────────────────
+
+const INNER_N = 30;
+
+function buildTimeline(franchID: string): FranchiseTimeline {
+  const alumIDs = (TEAM_ALUMNI[franchID] || []).slice(0, INNER_N);
+  const players = alumIDs.map(getPlayer).filter(Boolean) as Player[];
+
+  const counts = new Map<number, Map<string, number>>();
+  for (const p of players) {
+    const pos = p.primaryPos ?? "—";
+    const start = Math.floor((p.debutYear ?? 0) / 10) * 10;
+    const end   = Math.floor((p.finalYear || p.debutYear || 0) / 10) * 10;
+    for (let d = start; d <= end; d += 10) {
+      if (!counts.has(d)) counts.set(d, new Map());
+      const inner = counts.get(d)!;
+      inner.set(pos, (inner.get(pos) ?? 0) + 1);
+    }
+  }
+
+  const rows: FranchiseDecadeRow[] = [...counts.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([decade, posMap]) => {
+      const byPosition: Record<string, number> = {};
+      let total = 0;
+      for (const [pos, n] of posMap.entries()) { byPosition[pos] = n; total += n; }
+      return { decadeStart: decade, total, byPosition };
+    });
+
+  let peakDecade: number | null = null;
+  let peakCount = 0;
+  const dominantPositionByDecade: Record<number, string> = {};
+  for (const r of rows) {
+    if (r.total > peakCount) { peakCount = r.total; peakDecade = r.decadeStart; }
+    let bestPos = "—", bestN = 0;
+    for (const [pos, n] of Object.entries(r.byPosition)) {
+      if (n > bestN) { bestN = n; bestPos = pos; }
+    }
+    dominantPositionByDecade[r.decadeStart] = bestPos;
+  }
+
+  return { rows, peakDecade, peakCount, dominantPositionByDecade, insight: buildTimelineInsight(rows, peakDecade, peakCount, dominantPositionByDecade) };
+}
+
+function buildTimelineInsight(
+  rows: FranchiseDecadeRow[],
+  peakDecade: number | null,
+  peakCount: number,
+  dominant: Record<number, string>,
+): string {
+  if (rows.length === 0 || peakDecade === null) {
+    return "Not enough alumni in the bundled set to plot a meaningful timeline.";
+  }
+  const span = rows[rows.length - 1].decadeStart - rows[0].decadeStart;
+  const peakPos = dominant[peakDecade] ?? "—";
+  const peakPosLong = POS_LONG[peakPos] ?? peakPos;
+  return `The inner-30 spans ${span / 10 + 1} decades, peaking in the ${peakDecade}s ` +
+         `with ${peakCount} active alumni — driven mostly by ${peakPosLong}.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Section: State Density — top-100 player counts across every state, with
+// the user's state highlighted and bucketed by quintile so the tile-map
+// renders a clean choropleth.
+// ─────────────────────────────────────────────────────────────────────────
+
+function buildStateDensity(stateCode: string): StateDensityReport {
+  const rows: Omit<StateDensity, "quintile">[] = STATES.map((s) => ({
+    code: s.code,
+    name: s.name,
+    count: (PLAYERS_BY_STATE[s.code] || []).length,
+  })).sort((a, b) => b.count - a.count);
+
+  // Quintile by non-zero counts so empty states don't all sit in the bottom
+  // bucket and skew the rest of the scale.
+  const nonZero = rows.filter((r) => r.count > 0).map((r) => r.count);
+  const quintileOf = (n: number): 0 | 1 | 2 | 3 | 4 => {
+    if (n === 0 || nonZero.length === 0) return 0;
+    const sorted = [...nonZero].sort((a, b) => a - b);
+    const idx = sorted.findIndex((v) => v >= n);
+    const pos = idx === -1 ? sorted.length - 1 : idx;
+    const q = Math.floor((pos / sorted.length) * 5);
+    return Math.min(4, q) as 0 | 1 | 2 | 3 | 4;
+  };
+
+  const decorated: StateDensity[] = rows.map((r) => ({ ...r, quintile: quintileOf(r.count) }));
+  const userRow = decorated.find((r) => r.code === stateCode);
+  const userRank = decorated.findIndex((r) => r.code === stateCode) + 1;
+  const topState = decorated[0] ?? null;
+
+  const stateName = userRow?.name ?? stateCode;
+  const userQuintile = userRow?.quintile ?? 0;
+  const insight = !userRow
+    ? `No top-100 alumni records found for ${stateCode}.`
+    : userRow.count === 0
+      ? `${stateName} has produced none of the top-100-state player careers in the bundled set — but every legend started somewhere outside the leaderboard.`
+      : `${stateName} ranks #${userRank} of ${decorated.length} with ${userRow.count} top-100 player careers, ` +
+        `placing it in the ${["bottom", "fourth", "third", "second", "top"][userQuintile]} quintile by production.`;
+
+  return { rows: decorated, userRank: userRank || decorated.length, userQuintile, topState, insight };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Narrative — the closing paragraph (Cortex.COMPLETE in prod, template here)
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -340,7 +834,8 @@ function buildNarrative(
     parts.push(
       `And here's the line a scout watches for: ${comp.candidate.fullName}'s shape rhymes with ` +
       `${comp.anchor.fullName}'s. Both born in ${comp.anchor.birthState}. ` +
-      `${Math.round(comp.similarity * 100)}% similar by career W/SO/G or H/HR/G — depending on role. ` +
+      `${Math.round(comp.similarity * 100)}% cosine similarity across six era-adjusted axes — ` +
+      `tightest on ${comp.tightestAxis.label.toLowerCase()}, widest on ${comp.widestAxis.label.toLowerCase()}. ` +
       `One went to Cooperstown. The other didn't. The point: ` +
       `the shape of greatness doesn't always wear a plaque.`
     );
@@ -360,21 +855,86 @@ function buildNarrative(
 
 import { STATES } from "./data";
 
-export function buildScoutReport(franchID: string, stateCode: string): ScoutReport {
+export type ScoutReportArgs = {
+  city: string;
+  state: string;
+  radiusMi?: number;
+  // Optional override — if present, we use this franchise instead of the
+  // hometown-inferred one. Used by the "switch team" UI.
+  franchIDOverride?: string;
+};
+
+export function buildScoutReport(args: ScoutReportArgs): ScoutReport {
+  const city = (args.city ?? "").trim();
+  const state = (args.state ?? "").trim().toUpperCase();
+  const radiusMi = args.radiusMi ?? DEFAULT_RADIUS_MI;
+
+  // Resolve hometown coords (if known).
+  const centroid = geocodeCity(city, state);
+  const hometownInput: HometownInput = {
+    city,
+    state,
+    lat: centroid?.lat ?? null,
+    lng: centroid?.lng ?? null,
+    matched: centroid !== null,
+  };
+
+  // Infer franchise — by hometown coords when available, else state fallback.
+  let teamInference: TeamInference;
+  if (hometownInput.matched && hometownInput.lat !== null && hometownInput.lng !== null) {
+    teamInference = inferFranchise(hometownInput.lat, hometownInput.lng);
+  } else {
+    teamInference = inferFranchiseFromState(state);
+  }
+  if (args.franchIDOverride) {
+    const overrideTeam = TEAM_LOCATIONS.find((t) => t.franchID === args.franchIDOverride);
+    if (overrideTeam) {
+      teamInference = {
+        inferredFranchID: overrideTeam.franchID,
+        inferredTeam: overrideTeam,
+        distanceMi: hometownInput.matched
+          ? haversineMi(hometownInput.lat!, hometownInput.lng!, overrideTeam.lat, overrideTeam.lng)
+          : 0,
+        runnersUp: teamInference.runnersUp,
+        basis: "override",
+      };
+    }
+  }
+  const franchID = teamInference.inferredFranchID;
+
   const team = getTeam(franchID);
-  const stateName = STATES.find((s) => s.code === stateCode)?.name ?? stateCode;
-  const hometown = buildHometown(stateCode);
+  const stateName = STATES.find((s) => s.code === state)?.name ?? state;
+  const hometown = buildHometown(hometownInput, radiusMi);
   const persona  = buildPersona(franchID);
-  const comp     = buildComp(franchID, stateCode);
-  const didYouKnow = buildDidYouKnow(franchID, stateCode);
+  const timeline = buildTimeline(franchID);
+  const stateDensity = buildStateDensity(state);
+  const comp     = buildComp(franchID, hometownInput, radiusMi);
+  const didYouKnow = buildDidYouKnow(franchID, state);
   const narrative = buildNarrative(team, stateName, hometown, persona, comp);
 
   // Signature — a short distinctive tagline.
+  const where = hometownInput.matched ? `${city}, ${state}` : `${stateName} (state-level fallback)`;
   const signature = team && hometown[0]
-    ? `${team.name} × ${stateName} · scouted via ${hometown.length} hometown careers, ` +
+    ? `${team.name} × ${where} · scouted via ${hometown.length} ` +
+      `${hometownInput.matched ? `careers within ${radiusMi} mi` : "in-state careers"}, ` +
       `${persona.reduce((n, x) => n + x.count, 0)} franchise inner-circle profiles, ` +
       `${comp ? "1 hidden comp" : "0 hidden comps"}.`
     : "";
 
-  return { team, stateCode, stateName, hometown, persona, comp, didYouKnow, narrative, signature };
+  return {
+    team,
+    stateCode: state,
+    stateName,
+    hometownInput,
+    teamInference,
+    radiusMi,
+    hometown,
+    persona,
+    timeline,
+    stateDensity,
+    comp,
+    didYouKnow,
+    narrative,
+    signature,
+  };
 }

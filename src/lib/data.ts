@@ -8,7 +8,9 @@ import archetypes from "@/data/archetypes.json";
 import leaders from "@/data/leaders.json";
 import hofList from "@/data/hof.json";
 import meta from "@/data/meta.json";
-import type { Player, Franchise, Archetype } from "./types";
+import cities from "@/data/cities.json";
+import teamLocations from "@/data/team_locations.json";
+import type { Player, Franchise, Archetype, CityCentroid, TeamLocation } from "./types";
 
 export const PLAYERS = players as unknown as Record<string, Player>;
 export const TEAMS = teams as unknown as Franchise[];
@@ -17,6 +19,8 @@ export const PLAYERS_BY_STATE = playersByState as unknown as Record<string, stri
 export const ARCHETYPES = archetypes as unknown as Record<string, Record<string, Archetype>>;
 export const LEADERS = leaders as unknown as Record<string, string[]>;
 export const HOF = hofList as unknown as string[];
+export const CITIES = cities as unknown as CityCentroid[];
+export const TEAM_LOCATIONS = teamLocations as unknown as TeamLocation[];
 export const META = meta as unknown as {
   playerCount: number;
   teamCount: number;
