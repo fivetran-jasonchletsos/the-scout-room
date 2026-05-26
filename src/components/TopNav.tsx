@@ -3,8 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-
 const NAV: { href: string; label: string; external?: boolean }[] = [
   { href: "/",             label: "Scout Room" },
   { href: "/architecture", label: "Architecture" },
@@ -23,7 +21,7 @@ export default function TopNav() {
     <header className="sticky top-0 z-30 border-b border-wire bg-abyss/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-x-6 px-4 py-3 sm:px-8 md:px-10">
         <Link
-          href={`${BASE_PATH}/`}
+          href="/"
           aria-label="The Scout Room — home"
           className="flex-none flex items-baseline gap-2 text-chalk hover:text-gold focus:outline-none focus:ring-2 focus:ring-gold/40"
         >
@@ -50,7 +48,7 @@ export default function TopNav() {
             ) : (
               <Link
                 key={item.href}
-                href={`${BASE_PATH}${item.href}`}
+                href={item.href}
                 aria-current={here(item.href) ? "page" : undefined}
                 className={
                   "text-xs sm:text-sm font-medium transition-colors whitespace-nowrap " +
