@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import TopNav from "@/components/TopNav";
 import Footer from "@/components/Footer";
+import Script from "next/script";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -30,6 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <TopNav />
         <div className="flex-1">{children}</div>
         <Footer />
+        <Script src="/feedback-widget.js" strategy="afterInteractive" />
       </body>
     </html>
   );
